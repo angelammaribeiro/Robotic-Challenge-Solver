@@ -16,7 +16,7 @@
 #define MAX_TIME_SECONDS 200.0
 #define M_PI 3.14159265358979323846
 
-struct cell_t
+struct cell_t 
 {
     int x, y;
 } controlCellPath[1024], newCell;

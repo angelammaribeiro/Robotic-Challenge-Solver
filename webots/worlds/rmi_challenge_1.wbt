@@ -1,4 +1,4 @@
-#VRML_SIM R2023b utf8
+#VRML_SIM R2025a utf8
 
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackground.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2023b/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
@@ -37,7 +37,7 @@ RectangleArena {
 }
 DEF EPUCK E-puck {
   translation 0.075 0.075 0
-  controller "C1_pClient"
+  controller "agent_102594_109061"
   window "botstudio"
   camera_width 32
   camera_height 32
