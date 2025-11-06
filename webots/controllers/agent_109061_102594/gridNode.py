@@ -9,6 +9,9 @@ class GridNode:
 
     def add_neighbor(self, neighbor_node):
         self.neighbors.append(neighbor_node)
+
+    def remove_neighbor(self, neighbor_node):
+        self.neighbors.remove(neighbor_node)
         
     def mark_visited(self):
         self.visited = True

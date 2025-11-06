@@ -62,13 +62,14 @@ def run_agent():
     direction_mapping = {}
 
     #constants
-    CENTER_TOL  = 0.02  # Tolerance to consider the robot at the center of a cell (per assignment spec)
+    CENTER_TOL  = 0.015  # Tolerance to consider the robot at the center of a cell (per assignment spec)
     SENSOR_THRESHOLD = 100.0  # Threshold to consider an obstacle detected by distance sensors
     MAX_SPEED   = 6.28
     CELL = 0.15
-    ALIGN_TOL_DEG = 5.0      # stop rotating when within this tolerance
+    ALIGN_TOL_DEG = 0.5      # stop rotating when within this tolerance
     SETTLE_STEPS  = 6        # require stability N steps in a row
     Kp_turn       = 2.0      # rotation proportional gain (increased for visible rotation)
+    MANAHATTAN_THRESHOLD = 20  # Threshold distance for Manhattan distance to consider cells "close"
 
     # Intializing next cell
     next_cell = None
@@ -93,6 +94,7 @@ def run_agent():
     
     def heuristic(node, goal):
         # Manhattan distance for 4-connected grid
+        print("Heuristic calculation between", node, "and", goal, "is", abs(node[0] - goal[0]) + abs(node[1] - goal[1]))
         return abs(node[0] - goal[0]) + abs(node[1] - goal[1])
     
     def reconstruct_path(came_from_map, current):
@@ -147,6 +149,41 @@ def run_agent():
     
     def get_free_neighbors(cell):
         return grid_nodes[cell].neighbors if cell in grid_nodes else []
+    
+    #Determine next cell helpers
+    def find_center_cell(cells):
+        if not cells:
+            return None
+        avg_i = sum(i for i, j in cells) / len(cells)
+        avg_j = sum(j for i, j in cells) / len(cells)
+        print("Center cell calculated as:", (round(avg_i), round(avg_j)))
+        return (round(avg_i), round(avg_j))
+
+    def get_directions_info(sensor_vals, cardinal_direction):
+        """
+        Helper function to determine obstacle/free status in all directions
+        based on sensor values and current cardinal heading.
+        
+        Args:
+            sensor_vals: List of 8 distance sensor values
+            cardinal_direction: Current cardinal direction ("N", "E", "S", "W")
+            
+        Returns:
+            Dictionary mapping absolute directions to Checkpoint.OBSTACLE or Checkpoint.FREE
+        """
+        front_h = REL_TO_ABS[cardinal_direction]["front"]
+        right_h = REL_TO_ABS[cardinal_direction]["right"]
+        left_h  = REL_TO_ABS[cardinal_direction]["left"]
+        back_h  = REL_TO_ABS[cardinal_direction]["back"]
+
+        directions_info = {}
+        #print("Front heading:", sensor_vals[0] + sensor_vals[7])
+        directions_info[front_h] = Checkpoint.OBSTACLE if (sensor_vals[0] > SENSOR_THRESHOLD or sensor_vals[7] > SENSOR_THRESHOLD or (sensor_vals[0] + sensor_vals[7] > 145)) else Checkpoint.FREE
+        directions_info[right_h] = Checkpoint.OBSTACLE if sensor_vals[2] > SENSOR_THRESHOLD else Checkpoint.FREE
+        directions_info[left_h] = Checkpoint.OBSTACLE if sensor_vals[5] > SENSOR_THRESHOLD else Checkpoint.FREE
+        directions_info[back_h] = Checkpoint.OBSTACLE if (sensor_vals[4] > SENSOR_THRESHOLD or sensor_vals[3] > SENSOR_THRESHOLD) else Checkpoint.FREE
+        
+        return directions_info
 
     #movement
     def cruising_speed(left_speed, right_speed):
@@ -240,28 +277,25 @@ def run_agent():
 
         # Update directions info if at center
         if at_center and current_node.neighbors == []:
-            front_h = REL_TO_ABS[cardinal]["front"]
-            right_h = REL_TO_ABS[cardinal]["right"]
-            left_h  = REL_TO_ABS[cardinal]["left"]
-            back_h  = REL_TO_ABS[cardinal]["back"]
-
-            directions_info[front_h] = Checkpoint.OBSTACLE if (vals[0] > SENSOR_THRESHOLD or vals[7] > SENSOR_THRESHOLD or (vals[0] + vals[7] > 140))  else Checkpoint.FREE
-            directions_info[right_h] = Checkpoint.OBSTACLE if vals[2] > SENSOR_THRESHOLD else Checkpoint.FREE
-            directions_info[left_h] = Checkpoint.OBSTACLE if vals[5] > SENSOR_THRESHOLD else Checkpoint.FREE
-            directions_info[back_h] = Checkpoint.OBSTACLE if (vals[4] > SENSOR_THRESHOLD or vals[3] > SENSOR_THRESHOLD) else Checkpoint.FREE
-
+            directions_info = get_directions_info(vals, cardinal)
 
             # Update the direction mapping
             direction_mapping[(i, j)] = directions_info
+
+
+            #print("Distance sensor values:", vals)
+            #print(f"At cell ({i}, {j}), direction mapping: {direction_mapping[(i, j)]}")
 
             #Determine unvisited neighbors
             for direction, status in direction_mapping.get((i, j), {}).items():
                 if status == Checkpoint.FREE:
                     (dx, dy) = DIRECTION_OFFSETS[direction]
                     neighbor_coord = (i + dx, j + dy)
-                    current_node.add_neighbor(neighbor_coord)
+                    if (neighbor_coord not in grid_nodes) or (current_node.grid_coord in grid_nodes[neighbor_coord].neighbors):
+                        current_node.add_neighbor(neighbor_coord)
                     if neighbor_coord not in grid_nodes:
                         unvisited_count += 1
+                        
 
         if (i,j) not in grid_nodes:
             grid_nodes[(i, j)] = current_node
@@ -272,34 +306,53 @@ def run_agent():
 
         #Find the  next cell to visit
         # Check all neighbors to find an unvisited one, not just the first
-        unvisited_neighbor = None
+        unvisited_neighbor = []
         for neighbor in current_node.neighbors:
-            if neighbor not in grid_nodes:
-                unvisited_neighbor = neighbor
+            if neighbor not in grid_nodes and neighbor not in unvisited_neighbor:
+                unvisited_neighbor.append(neighbor)
                 break
 
-        
-        if not planned_path:
-            if unvisited_neighbor:
-                next_cell = unvisited_neighbor
+        if at_center:   
+            if not planned_path:
+                if unvisited_neighbor:
+                    #print("Moving to unvisited neighbor:", unvisited_neighbor)
+                    if cell_to_comeback:
+                        center_cell = find_center_cell(list(cell_to_comeback.keys()))
+                        distance = 100
+                        for cell in unvisited_neighbor:
+                            dist = heuristic(center_cell, cell)
+                            if dist < distance:
+                                distance = dist
+                                next_cell = cell
+                    
+                        next_cell = unvisited_neighbor[0]
 
-            if next_cell in grid_nodes and cell_to_comeback:
-                next_cell = min(
-                    cell_to_comeback.keys(),
-                    key=lambda cell: heuristic(current_node.grid_coord, cell),
-                )
-                path = astar(current_node.grid_coord, next_cell, get_free_neighbors)
-                
-                if path and len(path) > 1:
-                    planned_path = path[1:]  # Exclude current cell
-                    cell_to_comeback[next_cell] -= 1
-                    if cell_to_comeback[next_cell] <= 0:
-                        del cell_to_comeback[next_cell]
+                if next_cell in grid_nodes and cell_to_comeback:
 
-        else :
-            next_cell = planned_path[0]
-            if (i,j) == next_cell:
-                planned_path.pop(0)
+                    #print("Planning path to next cell to comeback...")
+                    next_cell = min(
+                        cell_to_comeback.keys(),
+                        key=lambda cell: heuristic(current_node.grid_coord, cell),
+                    )
+                    path = astar(current_node.grid_coord, next_cell, get_free_neighbors)
+                    #print("The next cell to comeback is:", next_cell)
+                    #n = get_free_neighbors(current_node.grid_coord)
+                    #for neigh in n:
+                        #print("Neighbor of current cell:", neigh)
+                    
+                    if path and len(path) > 1:
+                        #print("Path found:", path)
+                        planned_path = path[1:]  # Exclude current cell
+                        cell_to_comeback[next_cell] -= 1
+                        if cell_to_comeback[next_cell] <= 0:
+                            del cell_to_comeback[next_cell]
+
+                print("Next cell : ", next_cell)
+
+            else :
+                next_cell = planned_path[0]
+                if (i,j) == next_cell:
+                    planned_path.pop(0)
 
         #find the heading to next cell
         if next_cell:
@@ -320,12 +373,11 @@ def run_agent():
         # --- decide action at center: rotate or move ---
         if at_center and direction and (direction != cardinal):
             # Stop & rotate in place until aligned; this function blocks until done.
-            print("Rotating towards:", direction)
             rotate_towards(direction)
         # after it returns, we are aligned; let the next loop tick set forward motion
         elif direction:
             # Not rotating: go forward (or keep your cruising logic)
-            cruising_speed(0.5 * MAX_SPEED, 0.5 * MAX_SPEED)
+            cruising_speed(0.65 * MAX_SPEED, 0.65 * MAX_SPEED)
         else:
             # No next_cell yet: just stop (or keep a gentle crawl if you prefer)
             cruising_speed(0.0, 0.0)
@@ -334,9 +386,13 @@ def run_agent():
         for cell, count in cell_to_comeback.items():
             print(f"Cell {cell}: {count} unvisited neighbors")
 
-        print ("-----")  # Separator for readability
-        print("Next Cell:", next_cell)
-        print("Target Direction:", direction)
+        #print ("-----")  # Separator for readability
+        #print("Next cell:", next_cell)
+
+        #print the reachable neighbors from every cell in the grid
+        #print("Neighbors from each cell:")
+        #for cell, neighbors in grid_nodes.items():
+            #print(f"Cell {cell}: {neighbors.neighbors}")
 
 def heading_to_cardinal(heading_deg: float) -> str:
     """
@@ -347,6 +403,8 @@ def heading_to_cardinal(heading_deg: float) -> str:
     # Divide 360° into 4 equal sectors of 90° each
     index = int(((heading_deg + 45) % 360) / 90)
     return directions[index]
+
+
 
 if __name__ == "__main__":
     run_agent()
