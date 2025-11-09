@@ -1,8 +1,12 @@
 from controller import Robot
 import math
+import os
 from gridNode import GridNode
 from checkpoint import Checkpoint
 import heapq
+
+from grid import GridMap
+from mapping_writer import write_map
 
 def run_agent():
     robot = Robot()
@@ -61,14 +65,45 @@ def run_agent():
     #Initializing dictionary for mapping
     direction_mapping = {}
 
+    # Mapping output helpers
+    discovered_map = GridMap()
+    map_origin = (0, 0)
+    discovered_map.mark_visited(map_origin)
+
+    controller_dir = os.path.dirname(__file__)
+    project_root = os.path.abspath(os.path.join(controller_dir, "..", ".."))
+
+    env_supervisor_dir = os.getenv("C2_SUPERVISOR_DIR")
+    candidate_dirs = [env_supervisor_dir] if env_supervisor_dir else []
+    candidate_dirs.extend(
+        [
+            os.path.join(project_root, "controllers", "C2_supervisor"),
+            os.path.join(project_root, "controllers", "c2_supervisor"),
+            os.path.join(project_root, "supervisors", "c2_supervisor"),
+            os.path.join(project_root, "supervisors", "C2Supervisor"),
+            os.path.join(project_root, "supervisor", "c2_supervisor"),
+            os.path.join(project_root, "supervisor", "C2Supervisor"),
+        ]
+    )
+
+    map_dir = next((d for d in candidate_dirs if d and os.path.isdir(d)), controller_dir)
+    os.makedirs(map_dir, exist_ok=True)
+
+    MAP_FILE_PATH = os.path.join(map_dir, "agent_109061_102594.map")
+    if map_dir == controller_dir:
+        print("[mapping] Warning: C2 supervisor directory not found; writing map beside controller.")
+
+    write_map(discovered_map, map_origin, MAP_FILE_PATH)
+    print(f"[mapping] Initial map written to {MAP_FILE_PATH}")
+
     #constants
     CENTER_TOL  = 0.015  # Tolerance to consider the robot at the center of a cell (per assignment spec)
-    SENSOR_THRESHOLD = 100.0  # Threshold to consider an obstacle detected by distance sensors
+    SENSOR_THRESHOLD = 95.0  # Threshold to consider an obstacle detected by distance sensors
     MAX_SPEED   = 6.28
     CELL = 0.15
     ALIGN_TOL_DEG = 0.5      # stop rotating when within this tolerance
     SETTLE_STEPS  = 6        # require stability N steps in a row
-    Kp_turn       = 2.0      # rotation proportional gain (increased for visible rotation)
+    Kp_turn       = 3.0      # rotation proportional gain (increased for visible rotation)
     MANAHATTAN_THRESHOLD = 20  # Threshold distance for Manhattan distance to consider cells "close"
 
     # Intializing next cell
@@ -94,7 +129,7 @@ def run_agent():
     
     def heuristic(node, goal):
         # Manhattan distance for 4-connected grid
-        print("Heuristic calculation between", node, "and", goal, "is", abs(node[0] - goal[0]) + abs(node[1] - goal[1]))
+        #print("Heuristic calculation between", node, "and", goal, "is", abs(node[0] - goal[0]) + abs(node[1] - goal[1]))
         return abs(node[0] - goal[0]) + abs(node[1] - goal[1])
     
     def reconstruct_path(came_from_map, current):
@@ -156,7 +191,7 @@ def run_agent():
             return None
         avg_i = sum(i for i, j in cells) / len(cells)
         avg_j = sum(j for i, j in cells) / len(cells)
-        print("Center cell calculated as:", (round(avg_i), round(avg_j)))
+        #print("Center cell calculated as:", (round(avg_i), round(avg_j)))
         return (round(avg_i), round(avg_j))
 
     def get_directions_info(sensor_vals, cardinal_direction):
@@ -177,8 +212,8 @@ def run_agent():
         back_h  = REL_TO_ABS[cardinal_direction]["back"]
 
         directions_info = {}
-        #print("Front heading:", sensor_vals[0] + sensor_vals[7])
-        directions_info[front_h] = Checkpoint.OBSTACLE if (sensor_vals[0] > SENSOR_THRESHOLD or sensor_vals[7] > SENSOR_THRESHOLD or (sensor_vals[0] + sensor_vals[7] > 145)) else Checkpoint.FREE
+        print("Front heading:", sensor_vals[0] + sensor_vals[7])
+        directions_info[front_h] = Checkpoint.OBSTACLE if (sensor_vals[0] > SENSOR_THRESHOLD or sensor_vals[7] > SENSOR_THRESHOLD or (sensor_vals[0] + sensor_vals[7] > 146)) else Checkpoint.FREE
         directions_info[right_h] = Checkpoint.OBSTACLE if sensor_vals[2] > SENSOR_THRESHOLD else Checkpoint.FREE
         directions_info[left_h] = Checkpoint.OBSTACLE if sensor_vals[5] > SENSOR_THRESHOLD else Checkpoint.FREE
         directions_info[back_h] = Checkpoint.OBSTACLE if (sensor_vals[4] > SENSOR_THRESHOLD or sensor_vals[3] > SENSOR_THRESHOLD) else Checkpoint.FREE
@@ -223,11 +258,9 @@ def run_agent():
             omega = Kp_turn * err
             vL, vR = -omega, omega
 
-            # clamp
-            m = max(abs(vL), abs(vR))
-            if m > max_v:
-                s = max_v / m
-                vL *= s; vR *= s
+            # clamp to prevent exceeding motor limits
+            vL = max(-max_v, min(max_v, vL))
+            vR = max(-max_v, min(max_v, vR))
 
             left.setVelocity(vL)
             right.setVelocity(vR)
@@ -258,8 +291,8 @@ def run_agent():
         x_curr = gps_values[0]
         y_curr = gps_values[1]
 
-        i = round((x_curr - x0) / 0.15)
-        j = round((y_curr - y0) / 0.15)
+        i = round((x_curr - x0) / CELL)
+        j = round((y_curr - y0) / CELL)
 
         # Get existing node or create a new one
         if (i, j) in grid_nodes:
@@ -270,7 +303,7 @@ def run_agent():
         current_node.mark_visited()
 
         #Check if robot is  at cell center
-        at_center = math.hypot(x_curr - (i * 0.15 + x0), y_curr - (j * 0.15 + y0)) <= CENTER_TOL
+        at_center = math.hypot(x_curr - (i * CELL + x0), y_curr - (j * CELL + y0)) <= CENTER_TOL
 
         #Initialize unvisited cells count 
         unvisited_count = 0
@@ -283,8 +316,8 @@ def run_agent():
             direction_mapping[(i, j)] = directions_info
 
 
-            #print("Distance sensor values:", vals)
-            #print(f"At cell ({i}, {j}), direction mapping: {direction_mapping[(i, j)]}")
+            print("Distance sensor values:", vals)
+            print(f"At cell ({i}, {j}), direction mapping: {direction_mapping[(i, j)]}")
 
             #Determine unvisited neighbors
             for direction, status in direction_mapping.get((i, j), {}).items():
@@ -296,6 +329,20 @@ def run_agent():
                     if neighbor_coord not in grid_nodes:
                         unvisited_count += 1
                         
+
+        # Persist the current view of the map whenever we stand at a cell centre
+        if at_center:
+            print(f"[mapping] Writing map at cell ({i}, {j}) heading {cardinal}")
+            discovered_map.mark_visited((i, j))
+            cell_info = direction_mapping.get((i, j))
+            if cell_info:
+                for dir_key, status in cell_info.items():
+                    print(f"[mapping]    {dir_key}: {status.name}")
+                    discovered_map.set_wall_between(
+                        (i, j), dir_key, status == Checkpoint.OBSTACLE
+                    )
+            write_map(discovered_map, map_origin, MAP_FILE_PATH)
+            print(f"[mapping] Map updated -> {MAP_FILE_PATH}")
 
         if (i,j) not in grid_nodes:
             grid_nodes[(i, j)] = current_node
@@ -347,7 +394,7 @@ def run_agent():
                         if cell_to_comeback[next_cell] <= 0:
                             del cell_to_comeback[next_cell]
 
-                print("Next cell : ", next_cell)
+                #print("Next cell : ", next_cell)
 
             else :
                 next_cell = planned_path[0]
@@ -377,14 +424,14 @@ def run_agent():
         # after it returns, we are aligned; let the next loop tick set forward motion
         elif direction:
             # Not rotating: go forward (or keep your cruising logic)
-            cruising_speed(0.65 * MAX_SPEED, 0.65 * MAX_SPEED)
+            cruising_speed(1 * MAX_SPEED, 1 * MAX_SPEED)
         else:
             # No next_cell yet: just stop (or keep a gentle crawl if you prefer)
             cruising_speed(0.0, 0.0)
             
-        print("Cells to comeback to:")
-        for cell, count in cell_to_comeback.items():
-            print(f"Cell {cell}: {count} unvisited neighbors")
+        #print("Cells to comeback to:")
+        #for cell, count in cell_to_comeback.items():
+            #print(f"Cell {cell}: {count} unvisited neighbors")
 
         #print ("-----")  # Separator for readability
         #print("Next cell:", next_cell)
