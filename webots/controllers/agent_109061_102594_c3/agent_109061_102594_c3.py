@@ -66,6 +66,13 @@ def run_agent():
 
     # Dictionary to store detected targets at grid positions
     detected_targets = {}
+    
+    # Track the actual starting cell
+    starting_cell = None
+    
+    # Track maze coordinates (read from simulator output if available)
+    maze_start_x = None  # Will be set from simulator output
+    maze_start_y = None
 
     #Initializing Dictionary to hold grid nodes
     grid_nodes = {}
@@ -163,7 +170,6 @@ def run_agent():
         
         if rgb_range < GRAY_THRESHOLD and max_rgb > BRIGHTNESS_THRESHOLD:
             # This is likely the normal gray floor
-            print(f"[COLOR DETECTION] Ignoring gray floor: RGB ({avg_r:.1f}, {avg_g:.1f}, {avg_b:.1f}), range: {rgb_range:.1f}")
             return None, None
         
         # Find closest matching target color (excluding black for now)
@@ -258,6 +264,193 @@ def run_agent():
     
     def get_free_neighbors(cell):
         return grid_nodes[cell].neighbors if cell in grid_nodes else []
+    
+    def solve_tsp_greedy(targets, start_pos):
+        """
+        Solve TSP using greedy nearest neighbor heuristic.
+        Returns: (ordered list of targets, total distance, full path with intermediate cells)
+        """
+        if not targets:
+            return [], 0, []
+        
+        unvisited = list(targets)
+        current = start_pos
+        tour = [current]
+        total_distance = 0
+        full_path = [current]
+        
+        while unvisited:
+            # Find nearest unvisited target
+            nearest = min(unvisited, key=lambda t: heuristic(current, t))
+            
+            # Find path from current to nearest
+            path_segment = astar(current, nearest, get_free_neighbors)
+            if path_segment:
+                # Add path (excluding current position since it's already in full_path)
+                full_path.extend(path_segment[1:])
+                total_distance += len(path_segment) - 1
+            
+            tour.append(nearest)
+            unvisited.remove(nearest)
+            current = nearest
+        
+        # Add return path to start
+        if current != start_pos:
+            return_path = astar(current, start_pos, get_free_neighbors)
+            if return_path:
+                full_path.extend(return_path[1:])  # Exclude current, include start
+                total_distance += len(return_path) - 1
+        
+        return tour, total_distance, full_path
+    
+    def generate_path_for_current_targets():
+        """
+        Generate and write path file for currently found targets.
+        Called whenever a new target is detected.
+        """
+        if not detected_targets:
+            return  # No targets yet, nothing to write
+        
+        # Get target positions
+        target_positions = list(detected_targets.keys())
+        start_position = starting_cell if starting_cell else (0, 0)
+        
+        # Solve TSP with current targets
+        tour, total_dist, full_path = solve_tsp_greedy(target_positions, start_position)
+        
+        print(f"\n[DYNAMIC PATH] Generating path for {len(detected_targets)} targets found so far...")
+        print(f"[DYNAMIC PATH] Path length: {total_dist} cells")
+        
+        # Write the path file
+        write_path_file(full_path)
+    
+    def write_path_file(full_path, filename="agent_109061_102594.path"):
+        """
+        Write the path to a .path file in the required format.
+        Each line contains: x y (in cell coordinates relative to start)
+        First and last lines should be 0 0
+        """
+        print(f"\n[PATH FILE] Starting to write path file...")
+        print(f"[PATH FILE] Path length: {len(full_path)}")
+        print(f"[PATH FILE] Starting cell: {starting_cell}")
+        
+        # Try to find C3_supervisor directory
+        controller_dir = os.path.dirname(__file__)
+        project_root = os.path.abspath(os.path.join(controller_dir, "..", ".."))
+        
+        # Look for C3_supervisor directory
+        candidate_dirs = [
+            os.path.join(project_root, "controllers", "C3_supervisor"),
+            os.path.join(project_root, "controllers", "c3_supervisor"),
+            os.path.join(project_root, "supervisors", "C3_supervisor"),
+            os.path.join(project_root, "supervisors", "c3_supervisor"),
+        ]
+        
+        # Find the first existing directory, or fall back to controller directory
+        output_dir = next((d for d in candidate_dirs if os.path.isdir(d)), controller_dir)
+        filepath = os.path.join(output_dir, filename)
+        
+        # Get the starting position for relative coordinates
+        start_i, start_j = starting_cell if starting_cell else (0, 0)
+        
+        print(f"[PATH FILE] Will convert from internal coords to relative coords")
+        print(f"[PATH FILE] First 3 path cells: {full_path[:3]}")
+        print(f"[PATH FILE] Last 3 path cells: {full_path[-3:]}")
+        
+        try:
+            print(f"[PATH FILE] Opening file: {filepath}")
+            with open(filepath, 'w') as f:
+                for idx, cell in enumerate(full_path):
+                    # Make coordinates relative to starting position
+                    relative_i = cell[0] - start_i
+                    relative_j = cell[1] - start_j
+                    
+                    # Internal grid: (i, j) where N:(+1,0), E:(0,-1), S:(-1,0), W:(0,+1)
+                    # Output format: x y where x is East-West, y is North-South
+                    # 
+                    # The robot's i axis represents North-South (N is +i, S is -i)
+                    # The robot's j axis represents West-East (E is -j, W is +j)
+                    # 
+                    # For output file, try completely different mapping:
+                    # Maybe j maps to y and i maps to x?
+                    x = relative_i  # Try i -> x
+                    y = relative_j  # Try j -> y
+                    f.write(f"{x} {y}\n")
+                    
+                    # Debug first few and last lines
+                    if idx < 5 or idx >= len(full_path) - 2:
+                        print(f"[PATH DEBUG] Cell {cell} -> relative({relative_i},{relative_j}) -> output({x},{y})")
+            
+            print(f"[PATH FILE] Successfully written to: {filepath}")
+            print(f"[PATH FILE] Total cells in path: {len(full_path)}")
+            print(f"[PATH FILE] Coordinates relative to start: {starting_cell}")
+            if output_dir == controller_dir:
+                print(f"[PATH FILE] Warning: C3_supervisor directory not found, file written to controller directory")
+            return filepath
+        except Exception as e:
+            print(f"[ERROR] Failed to write path file: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def print_final_solution():
+        """Print the final solution with shortest path through all targets."""
+        if not detected_targets:
+            print("\n" + "="*60)
+            print("[FINAL SOLUTION] No targets found!")
+            print("="*60)
+            return
+        
+        target_positions = list(detected_targets.keys())
+        # Use the actual starting cell, not (0,0)
+        start_position = starting_cell if starting_cell else (0, 0)
+        
+        print("\n" + "="*60)
+        print("[FINAL SOLUTION] All Targets Found!")
+        print("="*60)
+        print(f"Starting position: {start_position}")
+        print(f"Total targets found: {len(detected_targets)}")
+        print("\nTarget Details:")
+        for pos, info in sorted(detected_targets.items()):
+            print(f"  Target {info['id']} ({info['color']}): Cell {pos}")
+        
+        print("\n[DEBUG] All explored cells:")
+        for cell in sorted(grid_nodes.keys()):
+            neighbors = grid_nodes[cell].neighbors
+            print(f"  Cell {cell}: neighbors = {neighbors}")
+        
+        # Solve TSP (including return to start)
+        tour, total_dist, full_path = solve_tsp_greedy(target_positions, start_position)
+        
+        print(f"\n[DEBUG] Raw path (internal coordinates):")
+        print(f"  {full_path[:20]}...")  # First 20 cells
+        
+        print(f"\n[SHORTEST PATH] Visiting order from start {start_position}:")
+        for i, cell in enumerate(tour):
+            if cell == start_position:
+                print(f"  {i}. START at {cell}")
+            elif cell in detected_targets:
+                info = detected_targets[cell]
+                print(f"  {i}. Target {info['id']} ({info['color']}) at {cell}")
+        print(f"  {len(tour)}. RETURN to START at {start_position}")
+        
+        print(f"\n[PATH SUMMARY]")
+        print(f"  Total distance (grid cells): {total_dist}")
+        print(f"  Number of targets: {len(detected_targets)}")
+        print(f"  Total cells in path: {len(full_path)}")
+        
+        print(f"\n[DETAILED PATH] Cell-by-cell route:")
+        path_str = " -> ".join(str(cell) for cell in full_path)
+        # Print in chunks to avoid too long lines
+        chunk_size = 80
+        for i in range(0, len(path_str), chunk_size):
+            print(f"  {path_str[i:i+chunk_size]}")
+        
+        # Write the path file
+        print()
+        write_path_file(full_path)
+        
+        print("="*60 + "\n")
     
     #Determine next cell helpers
     def find_center_cell(cells):
@@ -360,6 +553,9 @@ def run_agent():
         # Compute initial position
         x0 = gps_values[0] if x0 is None else x0
         y0 = gps_values[1] if y0 is None else y0
+        
+        if x0 == gps_values[0] and y0 == gps_values[1] and starting_cell is None:
+            print(f"[INIT] Robot starting world position: x={x0:.4f}, y={y0:.4f}")
 
         # Compute current position
         x_curr = gps_values[0]
@@ -367,6 +563,13 @@ def run_agent():
 
         i = round((x_curr - x0) / CELL)
         j = round((y_curr - y0) / CELL)
+        
+        # Track the starting cell (first cell we're in)
+        if starting_cell is None:
+            starting_cell = (i, j)
+            print(f"[INIT] Starting cell set to: {starting_cell}")
+            print(f"[INIT] Heading: {cardinal}")
+            print(f"[INIT] Sensor values: {vals}")
 
         # Get existing node or create a new one
         if (i, j) in grid_nodes:
@@ -379,13 +582,50 @@ def run_agent():
         #Check if robot is  at cell center
         at_center = math.hypot(x_curr - (i * CELL + x0), y_curr - (j * CELL + y0)) <= CENTER_TOL
 
+        # Check if we're visiting an already-detected target cell
+        if at_center and (i, j) in detected_targets:
+            info = detected_targets[(i, j)]
+            print(f"[TARGET VISIT] Visiting previously found target {info['id']} ({info['color']}) at cell ({i}, {j})")
+            # Generate updated path file when visiting a known target
+            generate_path_for_current_targets()
+
         # Detect target colors when at cell center
         if at_center and (i, j) not in detected_targets:
             target_id, color_name = detect_target_color(camera)
             if target_id is not None:
-                detected_targets[(i, j)] = {"id": target_id, "color": color_name}
-                print(f"[TARGET FOUND] Target {target_id} ({color_name}) detected at cell ({i}, {j})")
-                print(f"[TARGET FOUND] World position: ({x_curr:.3f}, {y_curr:.3f})")
+                # Check if this target ID was already found at another location
+                existing_targets = {info['id']: pos for pos, info in detected_targets.items()}
+                
+                if target_id in existing_targets:
+                    # Target ID already found at a different position - possible duplicate
+                    prev_pos = existing_targets[target_id]
+                    print(f"[WARNING] Target {target_id} ({color_name}) detected again at cell ({i}, {j})")
+                    print(f"[WARNING] Previously found at cell {prev_pos}. Ignoring duplicate.")
+                else:
+                    # New unique target
+                    detected_targets[(i, j)] = {"id": target_id, "color": color_name}
+                    print(f"[TARGET FOUND] Target {target_id} ({color_name}) detected at cell ({i}, {j})")
+                    print(f"[TARGET FOUND] World position: ({x_curr:.3f}, {y_curr:.3f})")
+                    print(f"[PROGRESS] Total targets found so far: {len(detected_targets)}")
+                    
+                    # Generate path file with current targets
+                    generate_path_for_current_targets()
+        
+        # Check if exploration should end (found 3-7 targets and no more unvisited cells nearby)
+        MIN_TARGETS = 3
+        MAX_TARGETS = 7
+        if len(detected_targets) >= MIN_TARGETS:
+            # Check if there are still unvisited neighbors to explore
+            has_unvisited = any(neighbor not in grid_nodes for neighbor in current_node.neighbors)
+            has_comeback_cells = bool(cell_to_comeback)
+            
+            if (len(detected_targets) >= MAX_TARGETS) or (not has_unvisited and not has_comeback_cells):
+                print(f"\n[EXPLORATION COMPLETE] Found {len(detected_targets)} targets")
+                print("[EXPLORATION COMPLETE] Computing shortest path through all targets...")
+                print_final_solution()
+                # Stop the robot
+                cruising_speed(0.0, 0.0)
+                break  # Exit main loop
 
         #Initialize unvisited cells count 
         unvisited_count = 0
@@ -397,6 +637,10 @@ def run_agent():
             # Update the direction mapping
             direction_mapping[(i, j)] = directions_info
 
+            if (i, j) == starting_cell:
+                print(f"[START CELL] Direction mapping at starting position {(i, j)}:")
+                for direction, status in directions_info.items():
+                    print(f"  {direction}: {status}")
 
             #print("Distance sensor values:", vals)
             #print(f"At cell ({i}, {j}), direction mapping: {direction_mapping[(i, j)]}")
@@ -508,6 +752,14 @@ def run_agent():
         #print("Neighbors from each cell:")
         #for cell, neighbors in grid_nodes.items():
             #print(f"Cell {cell}: {neighbors.neighbors}")
+    
+    # If loop ended without break (simulation ended), print solution anyway
+    print("\n[SIMULATION ENDED] Loop exited, checking for targets...")
+    if detected_targets:
+        print(f"[SIMULATION ENDED] Found {len(detected_targets)} targets. Computing final solution...")
+        print_final_solution()
+    else:
+        print("[SIMULATION ENDED] No targets were detected during exploration.")
 
 def heading_to_cardinal(heading_deg: float) -> str:
     """

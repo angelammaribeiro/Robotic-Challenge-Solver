@@ -124,13 +124,74 @@ def run_agent():
 
     #Helper functions
     #A*
-    def movement_cost(current, neighbor):
-        return 1  # Each grid step costs 1
+    def get_direction_between(current, neighbor):
+        """Get the cardinal direction from current to neighbor."""
+        di = neighbor[0] - current[0]
+        dj = neighbor[1] - current[1]
+        for direction, (dx, dy) in DIRECTION_OFFSETS.items():
+            if (di, dj) == (dx, dy):
+                return direction
+        return None
     
-    def heuristic(node, goal):
-        # Manhattan distance for 4-connected grid
-        #print("Heuristic calculation between", node, "and", goal, "is", abs(node[0] - goal[0]) + abs(node[1] - goal[1]))
-        return abs(node[0] - goal[0]) + abs(node[1] - goal[1])
+    def rotation_cost(from_dir, to_dir):
+        """Calculate the cost of rotating from one direction to another.
+        0° rotation = 0 cost, 90° = 0.5 cost, 180° = 1.0 cost"""
+        if from_dir == to_dir:
+            return 0
+        
+        # Map directions to angles for easier calculation
+        dir_angles = {"N": 0, "E": 90, "S": 180, "W": 270}
+        angle_diff = abs(dir_angles[to_dir] - dir_angles[from_dir])
+        
+        # Normalize to [0, 180]
+        if angle_diff > 180:
+            angle_diff = 360 - angle_diff
+        
+        # Cost: 90° = 0.5, 180° = 1.0
+        return angle_diff / 180.0
+    
+    def movement_cost(current, neighbor, current_dir=None):
+        """Cost includes movement (1) plus rotation cost if direction changes."""
+        base_cost = 1  # Each grid step costs 1
+        
+        if current_dir is None:
+            return base_cost
+        
+        # Calculate required direction for this move
+        required_dir = get_direction_between(current, neighbor)
+        if required_dir is None:
+            return base_cost
+        
+        # Add rotation cost
+        rot_cost = rotation_cost(current_dir, required_dir)
+        return base_cost + rot_cost
+    
+    def heuristic(node, goal, current_dir=None):
+        """Manhattan distance with estimated rotation cost.
+        If we know the current direction, estimate minimum rotations needed."""
+        manhattan = abs(node[0] - goal[0]) + abs(node[1] - goal[1])
+        
+        if manhattan == 0:
+            return 0
+        
+        # If we don't know direction, use simple estimate
+        if current_dir is None:
+            return manhattan + 0.5  # Assume at least one 90° turn
+        
+        # Estimate direction to goal
+        di = goal[0] - node[0]
+        dj = goal[1] - node[1]
+        
+        # Determine primary direction(s) to goal
+        estimated_rot_cost = 0
+        if di != 0:  # Need to move in i direction
+            target_dir = "N" if di > 0 else "S"
+            estimated_rot_cost = max(estimated_rot_cost, rotation_cost(current_dir, target_dir))
+        if dj != 0:  # Need to move in j direction  
+            target_dir = "W" if dj > 0 else "E"
+            estimated_rot_cost = max(estimated_rot_cost, rotation_cost(current_dir, target_dir))
+        
+        return manhattan + estimated_rot_cost
     
     def reconstruct_path(came_from_map, current):
         path = [current]
@@ -140,7 +201,15 @@ def run_agent():
         path.reverse()
         return path
 
-    def astar(start, goal, get_neighbors_func):
+    def astar(start, goal, get_neighbors_func, start_direction=None):
+        """A* pathfinding with rotation-aware costs.
+        
+        Args:
+            start: Starting grid position (i, j)
+            goal: Goal grid position (i, j)
+            get_neighbors_func: Function to get valid neighbors
+            start_direction: Current cardinal direction ("N", "E", "S", "W")
+        """
         if start == goal:
             return [start]
 
@@ -148,9 +217,14 @@ def run_agent():
         came_from.clear()
         g_score.clear()
         f_score.clear()
+        
+        # Track direction at each node for better cost calculation
+        direction_at = {}  # Maps node -> direction we're facing when we arrive
+        if start_direction:
+            direction_at[start] = start_direction
 
         g_score[start] = 0
-        f_score[start] = heuristic(start, goal)
+        f_score[start] = heuristic(start, goal, start_direction)
         heapq.heappush(open_set, (f_score[start], 0, start))
 
         closed = set()
@@ -169,14 +243,28 @@ def run_agent():
             if current == goal:
                 return reconstruct_path(came_from, current)
 
+            # Get the direction we're facing at current node
+            current_dir = direction_at.get(current)
+
             for neighbor in get_neighbors_func(current):
                 if neighbor in closed:
                     continue
-                tentative_g = current_g + movement_cost(current, neighbor)
+                
+                # Calculate movement cost including rotation
+                move_cost = movement_cost(current, neighbor, current_dir)
+                tentative_g = current_g + move_cost
+                
                 if tentative_g < g_score.get(neighbor, float('inf')):
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g
-                    estimated_f = tentative_g + heuristic(neighbor, goal)
+                    
+                    # Store the direction we'll be facing when we reach neighbor
+                    neighbor_dir = get_direction_between(current, neighbor)
+                    if neighbor_dir:
+                        direction_at[neighbor] = neighbor_dir
+                    
+                    # Heuristic uses the direction we'll be facing at neighbor
+                    estimated_f = tentative_g + heuristic(neighbor, goal, neighbor_dir)
                     f_score[neighbor] = estimated_f
                     heapq.heappush(open_set, (estimated_f, tentative_g, neighbor))
 
@@ -184,6 +272,45 @@ def run_agent():
     
     def get_free_neighbors(cell):
         return grid_nodes[cell].neighbors if cell in grid_nodes else []
+    
+    def score_comeback_cell(cell, current_pos, current_dir, comeback_dict):
+        """
+        Score a comeback cell based on multiple factors:
+        - Distance (path cost with rotations)
+        - Number of unvisited neighbors (priority to cells with more unexplored branches)
+        - Rotation cost from current direction
+        
+        Lower score is better.
+        """
+        # Factor 1: Actual path cost using A* heuristic (distance + rotation)
+        path_cost = heuristic(current_pos, cell, current_dir)
+        
+        # Factor 2: Number of unvisited neighbors (more neighbors = higher priority = lower score)
+        # Invert so more neighbors means lower score
+        unvisited_neighbors = comeback_dict.get(cell, 1)
+        neighbor_score = 1.0 / (unvisited_neighbors + 1)  # +1 to avoid division by zero
+        
+        # Factor 3: Check if we need to rotate to get there
+        # Calculate the primary direction to the target
+        di = cell[0] - current_pos[0]
+        dj = cell[1] - current_pos[1]
+        
+        rotation_penalty = 0
+        if di != 0 or dj != 0:
+            # Determine the most direct direction
+            if abs(di) > abs(dj):
+                primary_dir = "N" if di > 0 else "S"
+            else:
+                primary_dir = "W" if dj > 0 else "E"
+            rotation_penalty = rotation_cost(current_dir, primary_dir)
+        
+        # Weighted combination:
+        # - Path cost is most important (weight: 1.0)
+        # - Neighbor count is secondary (weight: 2.0 to encourage cells with more branches)
+        # - Rotation is considered but less important (weight: 0.3, already in path_cost but emphasize)
+        total_score = path_cost + (2.0 * neighbor_score) + (0.3 * rotation_penalty)
+        
+        return total_score
     
     #Determine next cell helpers
     def find_center_cell(cells):
@@ -352,36 +479,43 @@ def run_agent():
             cell_to_comeback[(i, j)] = unvisited_count -1
 
         #Find the  next cell to visit
-        # Check all neighbors to find an unvisited one, not just the first
+        # Check all neighbors to find unvisited ones (removed break to get all)
         unvisited_neighbor = []
         for neighbor in current_node.neighbors:
             if neighbor not in grid_nodes and neighbor not in unvisited_neighbor:
                 unvisited_neighbor.append(neighbor)
-                break
 
         if at_center:   
             if not planned_path:
                 if unvisited_neighbor:
-                    #print("Moving to unvisited neighbor:", unvisited_neighbor)
-                    if cell_to_comeback:
-                        center_cell = find_center_cell(list(cell_to_comeback.keys()))
-                        distance = 100
-                        for cell in unvisited_neighbor:
-                            dist = heuristic(center_cell, cell)
-                            if dist < distance:
-                                distance = dist
-                                next_cell = cell
-                    
+                    # If there are multiple unvisited neighbors, choose the best one
+                    if len(unvisited_neighbor) > 1:
+                        # Prefer direction with least rotation cost
+                        next_cell = min(
+                            unvisited_neighbor,
+                            key=lambda cell: (
+                                rotation_cost(cardinal, get_direction_between(current_node.grid_coord, cell)),
+                                # If rotation costs are equal, prefer cells closer to comeback centers
+                                heuristic(cell, find_center_cell(list(cell_to_comeback.keys())) if cell_to_comeback else cell, None)
+                            )
+                        )
+                    else:
                         next_cell = unvisited_neighbor[0]
 
                 if next_cell in grid_nodes and cell_to_comeback:
 
                     #print("Planning path to next cell to comeback...")
+                    # Use the smarter scoring function to select the best comeback cell
                     next_cell = min(
                         cell_to_comeback.keys(),
-                        key=lambda cell: heuristic(current_node.grid_coord, cell),
+                        key=lambda cell: score_comeback_cell(
+                            cell, 
+                            current_node.grid_coord, 
+                            cardinal, 
+                            cell_to_comeback
+                        )
                     )
-                    path = astar(current_node.grid_coord, next_cell, get_free_neighbors)
+                    path = astar(current_node.grid_coord, next_cell, get_free_neighbors, cardinal)
                     #print("The next cell to comeback is:", next_cell)
                     #n = get_free_neighbors(current_node.grid_coord)
                     #for neigh in n:
